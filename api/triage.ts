@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { executeTriage } from './_triageEngine';
+import { executeTriage } from './_triageEngine.js';
 
 export const config = {
   maxDuration: 60, // Timeout up to 60 seconds on Vercel for batch AI processing

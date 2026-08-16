@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
-import { executeTriage } from './api/_triageEngine';
+import { executeTriage } from './api/_triageEngine.js';
 
 dotenv.config();
 
