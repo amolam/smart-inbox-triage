@@ -242,7 +242,41 @@ export function sanitizeMessageResult(
   };
 }
 
-// Function to call Gemini for a chunk of messages with 1 automatic retry
+// Supported, reliable production Gemini Flash models
+export const PRIMARY_FLASH_MODEL = 'gemini-2.5-flash';
+export const FALLBACK_FLASH_MODELS = ['gemini-3.6-flash', 'gemini-2.5-flash-lite'];
+
+// Helper to determine if an error is transient (e.g., 503 high demand, 429 rate limit, 500, 504)
+export function isTransientGeminiError(error: any): boolean {
+  if (!error) return false;
+  const status = error?.status || error?.statusCode || error?.response?.status;
+  if ([429, 500, 503, 504].includes(Number(status))) {
+    return true;
+  }
+  const msg = String(error?.message || error || '').toLowerCase();
+  return (
+    msg.includes('503') ||
+    msg.includes('unavailable') ||
+    msg.includes('high demand') ||
+    msg.includes('spikes in demand') ||
+    msg.includes('overloaded') ||
+    msg.includes('429') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('rate limit') ||
+    msg.includes('quota') ||
+    msg.includes('500') ||
+    msg.includes('504') ||
+    msg.includes('deadline_exceeded') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('fetch failed') ||
+    msg.includes('network error')
+  );
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Function to call Gemini for a chunk of messages with exponential backoff & model fallbacks
 export async function processMessageChunkWithGemini(
   messagesChunk: { id: string; text: string }[]
 ): Promise<MessageTriageItem[]> {
@@ -253,9 +287,9 @@ export async function processMessageChunkWithGemini(
 MESSAGES TO TRIAGE:
 ${messagesChunk.map((m) => `[Message ID: ${m.id}]\n${m.text}`).join('\n\n---' + '\n\n')}`;
 
-  const callModel = async () => {
+  const callModelWithSpecificName = async (modelName: string) => {
     const response = await ai.models.generateContent({
-      model: 'gemini-3.7-flash',
+      model: modelName,
       contents: userPrompt,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
@@ -269,17 +303,57 @@ ${messagesChunk.map((m) => `[Message ID: ${m.id}]\n${m.text}`).join('\n\n---' + 
     return JSON.parse(responseText);
   };
 
-  let rawJson: any;
-  try {
-    rawJson = await callModel();
-  } catch (firstErr) {
-    console.warn('First Gemini triage attempt failed, retrying once...', firstErr);
+  // Attempt strategy:
+  // Attempt 1: PRIMARY_FLASH_MODEL ('gemini-2.5-flash')
+  // Attempt 2: FALLBACK_FLASH_MODELS[0] ('gemini-flash-latest') after ~1s backoff
+  // Attempt 3: FALLBACK_FLASH_MODELS[1] ('gemini-3.7-flash') after ~2s backoff
+  const modelsToAttempt = [
+    PRIMARY_FLASH_MODEL,
+    FALLBACK_FLASH_MODELS[0] || PRIMARY_FLASH_MODEL,
+    FALLBACK_FLASH_MODELS[1] || PRIMARY_FLASH_MODEL,
+  ];
+
+  // Exponential backoff schedule in ms (with small jitter): ~1s, ~2s, ~4s
+  const backoffDelays = [1000, 2000, 4000];
+
+  let rawJson: any = null;
+  let lastError: any = null;
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const currentModel = modelsToAttempt[attempt - 1] || PRIMARY_FLASH_MODEL;
     try {
-      rawJson = await callModel();
-    } catch (retryErr: any) {
-      console.error('Gemini retry also failed:', retryErr);
-      throw new Error(`AI analysis failed: ${retryErr.message || 'Unknown error'}`);
+      rawJson = await callModelWithSpecificName(currentModel);
+      // Success
+      break;
+    } catch (err: any) {
+      lastError = err;
+      const isTransient = isTransientGeminiError(err);
+      console.warn(
+        `[Gemini Triage] Attempt ${attempt}/${maxAttempts} failed using model '${currentModel}' (transient: ${isTransient}):`,
+        err?.message || err
+      );
+
+      if (attempt < maxAttempts) {
+        // Compute backoff with 100-300ms jitter
+        const baseDelay = backoffDelays[attempt - 1] || 1000;
+        const jitter = Math.floor(Math.random() * 200);
+        const delayMs = baseDelay + jitter;
+        await sleep(delayMs);
+      }
     }
+  }
+
+  if (!rawJson) {
+    console.error(`[Gemini Triage] All ${maxAttempts} attempts exhausted. Last error:`, lastError);
+    if (isTransientGeminiError(lastError)) {
+      const transientErr: any = new Error('Gemini is temporarily unavailable. Please try again in a moment.');
+      transientErr.statusCode = 503;
+      throw transientErr;
+    }
+    const genericErr: any = new Error('Gemini is temporarily unavailable. Please try again in a moment.');
+    genericErr.statusCode = lastError?.statusCode || 500;
+    throw genericErr;
   }
 
   // Parse and validate items
