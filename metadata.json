@@ -1,0 +1,6 @@
+{
+  "name": "Smart Inbox Triage",
+  "description": "AI-powered operations inbox triage for logistics managers to prioritize operational messages, assess urgency, extract evidence, and draft responses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
